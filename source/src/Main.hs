@@ -40,6 +40,7 @@ import BNFC.Backend.Java
 import BNFC.Backend.Latex
 import BNFC.Backend.OCaml
 import BNFC.Backend.Pygments
+import BNFC.Backend.Rust
 import BNFC.CF (CF)
 import BNFC.GetCF
 import BNFC.Options hiding (make, Backend)
@@ -99,4 +100,5 @@ maketarget = \case
     TargetOCaml        -> makeOCaml
     TargetProfile      -> error "impossible"
     TargetPygments     -> makePygments
+    TargetRust         -> makeRust
     TargetCheck        -> error "impossible"

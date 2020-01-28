@@ -204,6 +204,10 @@ Executable bnfc
     -- Agda backend
     BNFC.Backend.Agda
 
+    -- Rust backend
+    BNFC.Backend.Rust
+    BNFC.Backend.Rust.DTypes
+
 -- --- Testing --------------------------------------------------------------
 Test-suite unit-tests
   Type: exitcode-stdio-1.0
