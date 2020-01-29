@@ -74,16 +74,16 @@ build = vcat [ "extern crate lalrpop;"
              ]
 
 main :: String -> CF -> Doc
-main name cf = vcat [ "#[macro_use]"
-                    , "extern crate lalrpop_util;"
-                    , ""
-                    , "lalrpop_mod!(pub " <> text name <> ");"
-                    , ""
-                    , "pub mod Abs" <> text name <> ";"
-                    , ""
-                    , "fn main() {"
-                    , "}"
-                    ]
+main name _ = vcat [ "#[macro_use]"
+                   , "extern crate lalrpop_util;"
+                   , ""
+                   , "lalrpop_mod!(pub " <> text name <> ");"
+                   , ""
+                   , "pub mod Abs" <> text name <> ";"
+                   , ""
+                   , "fn main() {"
+                   , "}"
+                   ]
 
 
 ast :: String -> CF -> Doc
@@ -91,17 +91,26 @@ ast _ cf = vsep . concat $ [ [ "use std::fmt::{Debug, Formatter, Error};" ]
                            , map prEnum $ getAbstractSyntax cf
                            ]
     where
-      prEnum (c, rs) = enum2doc (REnum (show c) (map (\(fun, _) -> (RVariant fun Nothing)) rs))
+      prEnum (Cat c, rs) = trace (show rs) $ enum2doc (REnum c (map vars rs))
+      vars (fun, []) = RVariant fun Nothing
+      vars (fun, cs) = RVariant fun $ Just $ map allocStrat cs
+
+allocStrat :: Cat -> (RIdent, RAlloc)
+allocStrat (Cat c)          = (c, Box)
+allocStrat (TokenCat c)     = (c, Stack)
+allocStrat (ListCat c)      = ("List", Vector)
+allocStrat (CoercCat str 0) = allocStrat (Cat str)
+allocStrat (CoercCat str n) = allocStrat (CoercCat str (n-1))
 
 parser :: String -> CF -> Doc
-parser name cf = 
-    vsep $ [ vcat [ "use" <+> "Abs" <> text name <> "::" <> lbrace <>
+parser name cf = trace ("\nname = " ++ show name ++ "\ncf = " ++ (show $ getAbstractSyntax cf) ++ "\n") $
+    vsep $ [ vcat [ "use crate::" <> "Abs" <> text name <> "::" <> lbrace <>
                     (sep $ punctuate (comma <> space) $ map (text . show) (cats cf)) <>
                     rbrace <> semi
                   , "use std::str::FromStr;"
                   ]
            , "grammar;"
-           , vcat $ map mkOne $ ruleGroups cf
+           , vsep $ map mkOne $ ruleGroups cf
            , vcat [ "Integer: i32 = {"
                   , "    r\"[0-9]+\" => i32::from_str(<>).unwrap()"
                   , "}"
@@ -109,15 +118,18 @@ parser name cf =
            ]
     where
       cats cf = [ fst c | c <- getAbstractSyntax cf ]
-      mkOne (cat, rules) = text "pub" <+> text (show cat) <> colon <+> text (show cat) <+> equals <+>
-                           lbrace <+> (vcat $ map mkRule rules) <+> rbrace
+      mkOne (cat, rules) = hang (text "pub" <+> text (show cat) <> colon <+> showCat cat <+> equals <+>
+                           lbrace) 4 (vcat $ map mkRule rules) $$ rbrace
+      showCat cat = case allocStrat cat of
+                      (s, Box)   -> (text "Box<") <> (text s) <> (text ">")
+                      (s, Stack) -> text s
 
 mkRule :: Rul Fun -> Doc
-mkRule r@(Rule fun cat _ _ ) = (rhs r) <+> "=>" <+> (text $ show cat) <> "::" <> (text fun)
+mkRule r@(Rule fun cat _ _ ) = trace (show cat ++ "  " ++ (show $ allocStrat cat)) $ (rhs r) <+> "=>" <+> (text $ show cat) <> "::" <> (text fun) <> comma
     where
       rhs r = case rhsRule r of
                 []  -> text "empty"
                 its -> hsep $ map mkIt its
       mkIt i = case i of
-                 Left c  -> (text "<") <> (text $ identCat c) <> (text ">")
+                 Left c  -> text $ identCat c
                  Right s -> (text "\"") <> text s <> (text "\"")
