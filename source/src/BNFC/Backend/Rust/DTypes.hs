@@ -1,8 +1,8 @@
 --{-# LANGUAGE NoImplicitPrelude #-}
 
 {-
-    BNF Converter: Rust Main file
-    Copyright (C) 2019  Author:  Martin Löfgren
+    BNF Converter: Rust data types
+    Copyright (C) 2020  Author:  Martin Löfgren
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -25,68 +25,104 @@ module BNFC.Backend.Rust.DTypes
     , RAlloc (..)
     , RIdent
     , enum2doc
+    , allocStrat
     ) where
 
 --import Prelude'
 
 import BNFC.PrettyPrint
+import BNFC.CF
 
 import Debug.Trace
 
--- Rust Enum
-
-data REnum    = REnum RIdent [RVariant]
-type RIdent   = String
-data RVariant = RVariant RIdent RData
-type RData    = (Maybe [(RIdent, RAlloc)])
-data RAlloc   = Stack | Box | Vector
-                deriving Show
+-- | The Enum is the Rust take on algebraic data types. We use it as our
+--   abstract data type.
+data REnum = REnum RIdent [RVariant]
 instance Show REnum where
     show = render . enum2doc
 
-enum2doc :: REnum -> Doc
-enum2doc (REnum ident vars) = (hang pre 4 body) $+$ rbrace
-    where
-      pre = (text "pub enum") <+> (text ident) <+> lbrace
-      body = vcat $ punctuate comma $ map var2doc vars
+-- | An identifier is a string.
+type RIdent = String
 
+-- | The variant: an identifier and possibly associated data.
+data RVariant = RVariant RIdent RData
 instance Show RVariant where
     show = render . var2doc
 
+-- | If we have assoicated data, we need to keep track of where to allocate it.
+type RData = Maybe [(RIdent, RAlloc)]
+
+-- | In Rust, we need to keep track of what can be allocated on the stack and
+--   what needs to be put on the heap (Boxed in Rust parlance). We also handle
+--   lists, which are implemented using the Vector data type.
+data RAlloc   = Stack | Box | Vector
+                deriving Show
+
+
+-- | There's a conflict between (Prelude.<>) and (BNFC.PrettyPrint.<>) and it's
+--   tedious to write the qualified name. Further, this operator looks like a
+--   Tie Bomber.
+(<-:->) :: Doc -> Doc -> Doc
+(<-:->) = (BNFC.PrettyPrint.<>)
+infixl 6 <-:->
+
+
+-- | Terminals can be stack allocated, non-terminals need to be put on the heap.
+allocStrat :: Cat -> (RIdent, RAlloc)
+allocStrat (Cat c)            = (c, Box)
+allocStrat (TokenCat c)       = (c, Stack)
+allocStrat (ListCat _)        = ("List", Vector)
+allocStrat cat@(CoercCat _ _) = allocStrat $ normCat cat
+
+
+-- | Render a Rust enum.
+enum2doc :: REnum -> Doc
+enum2doc (REnum ident vars) = hang pre 4 body $+$ rbrace
+  where
+    pre  = text "pub enum" <+> text ident <+> lbrace
+    body = vcat $ punctuate comma $ map var2doc vars
+
+
+-- | Render a Rust enum variant.
 var2doc :: RVariant -> Doc
-var2doc (RVariant ident ds) = trace (show ident ++ " -> " ++ show ds) $
-    text ident <+> case ds of
-                    Nothing  -> empty
-                    Just ds' -> lparen <+> hsep (punctuate comma (map alloc2doc ds')) <+> rparen
-
-testREnum :: REnum
-testREnum = REnum "Expr" [ RVariant "Number" (Just [("i32", Stack)])
-                    , RVariant "Op" (Just [("Expr", Box), ("Opcode", Stack), ("Expr", Box)])
-                    , RVariant "Error" Nothing
-                    ]
+var2doc (RVariant ident ds) =
+  text ident <-:-> case ds of
+    Nothing  -> empty
+    Just ds' -> lparen <-:-> hsep (punctuate comma (map variantData2doc ds'))
+                       <-:-> rparen
 
 
--- LALRPOP Rule
+-- | LALRPOP rule.
 data RRule = RRule RIdent Res [Rhs]
-data Res   = Res RIdent RAlloc
-data Rhs   = Rhs [RCat]
-data RCat  = Nonterminal String
-           | Terminal String
-
 instance Show RRule where
     show = render . rule2doc
 
+data Res = Res RIdent RAlloc
+newtype Rhs = Rhs [RCat]
+data RCat = Nonterminal String
+          | Terminal String
+
+
+-- | Render a lalrpop rule.
 rule2doc :: RRule -> Doc
-rule2doc (RRule ident (Res i a) rhss) = (hang pre 4 body) $+$ rbrace
+rule2doc (RRule ident (Res i a) rhss) = hang pre 4 body $+$ rbrace
     where
-      pre = (text "pub") <+> (text ident) <+> colon <+> alloc2doc (i, a) <+> equals <+> lbrace
+      pre = text "pub" <+> text ident <+> colon <+> variantData2doc (i, a) <+> equals <+> lbrace
       body = empty
 
-testRRule :: RRule
-testRRule = RRule "Expr" (Res "Expr" Box) []
+
+-- | Render variant data.
+variantData2doc :: (RIdent, RAlloc) -> Doc
+variantData2doc (i, Stack) = text $ rustDataType i
+variantData2doc (i, Box)  = hcat $ map text ["Box<", rustDataType i, ">"]
 
 
-alloc2doc :: (RIdent, RAlloc) -> Doc
-alloc2doc (i, Stack) = text i
-alloc2doc (i, Box)  = hcat $ map text ["Box<", i, ">"]
-                     
+-- | Map BNFC internal data types to Rust data types.
+rustDataType :: String -> String
+rustDataType n | n == "String"  = undefined
+               | n == "Integer" = "i32"
+               | n == "Double"  = undefined
+               | n == "Char"    = undefined
+               | n == "Ident"   = undefined
+               | otherwise      = n
+

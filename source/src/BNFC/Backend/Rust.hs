@@ -2,7 +2,7 @@
 
 {-
     BNF Converter: Rust Main file
-    Copyright (C) 2019  Author:  Martin Löfgren
+    Copyright (C) 2020  Author:  Martin Löfgren
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -26,30 +26,39 @@ import BNFC.CF
 import BNFC.Options
 import BNFC.Backend.Base
 import BNFC.PrettyPrint
+import BNFC.Utils
 
 import BNFC.Backend.Rust.DTypes
 
 import Debug.Trace
 
--- import Debug.Trace
-
+-- | Entry point for the Rust backend.
 makeRust :: SharedOptions -> CF -> MkFiles ()
-makeRust opts cf = trace (show opts) $ do
-  let astFileName    = "src/Abs" ++ name ++ ".rs"
+makeRust opts cf = do
+  let astFileName    = "src/abs_" ++ name ++ ".rs"
+      -- dispFileName   = "src/display_" ++ name ++ ".rs"
       parserFileName = "src/" ++ name ++ ".lalrpop"
       mainFileName   = "src/main.rs"
       buildFileName  = "build.rs"
       cargoFileName  = "Cargo.toml"
 
+  -- The abstract syntax data type and pretty printer (fmt::Display implementation)
   mkfile astFileName (ast name cf)
+  -- mkfile displayFileName (display name cf)
+
+  -- Generate lalrpop lexer/parser and associated build script
   mkfile parserFileName (parser name cf)
   mkfile buildFileName build
+
+  -- Genereate Cargo project files
   mkfile cargoFileName (cargo name)
   mkfile mainFileName (main name cf)
 
     where
-      name = lang opts
+      name = mkName [] SnakeCase $ lang opts
 
+
+-- | Generate Cargo project files.
 cargo :: String -> Doc
 cargo name = vcat [ "[package]"
                   , "name = \"" <> text name <> "\""
@@ -65,6 +74,8 @@ cargo name = vcat [ "[package]"
                   , "regex = \"0.2.1\""
                   ]
 
+
+-- | The build script, always the same.
 build :: Doc
 build = vcat [ "extern crate lalrpop;"
              , ""
@@ -73,63 +84,75 @@ build = vcat [ "extern crate lalrpop;"
              , "}"
              ]
 
+
+-- | Minimal main function, sole purpose to ensure the project compiles.
+--   TODO: Should restructure project as lib instead, and provide examples.
 main :: String -> CF -> Doc
 main name _ = vcat [ "#[macro_use]"
                    , "extern crate lalrpop_util;"
                    , ""
                    , "lalrpop_mod!(pub " <> text name <> ");"
                    , ""
-                   , "pub mod Abs" <> text name <> ";"
+                   , "pub mod abs_" <> text name <> ";"
                    , ""
                    , "fn main() {"
                    , "}"
                    ]
 
 
+-- | The abstract syntax data types.
 ast :: String -> CF -> Doc
 ast _ cf = vsep . concat $ [ [ "use std::fmt::{Debug, Formatter, Error};" ]
                            , map prEnum $ getAbstractSyntax cf
                            ]
     where
-      prEnum (Cat c, rs) = trace (show rs) $ enum2doc (REnum c (map vars rs))
+      prEnum (Cat c, rs) = enum2doc (REnum c (map vars rs))
       vars (fun, []) = RVariant fun Nothing
       vars (fun, cs) = RVariant fun $ Just $ map allocStrat cs
 
-allocStrat :: Cat -> (RIdent, RAlloc)
-allocStrat (Cat c)          = (c, Box)
-allocStrat (TokenCat c)     = (c, Stack)
-allocStrat (ListCat c)      = ("List", Vector)
-allocStrat (CoercCat str 0) = allocStrat (Cat str)
-allocStrat (CoercCat str n) = allocStrat (CoercCat str (n-1))
 
+-- | Generate the lalrpop lexer/parser.
 parser :: String -> CF -> Doc
-parser name cf = trace ("\nname = " ++ show name ++ "\ncf = " ++ (show $ getAbstractSyntax cf) ++ "\n") $
-    vsep $ [ vcat [ "use crate::" <> "Abs" <> text name <> "::" <> lbrace <>
-                    (sep $ punctuate (comma <> space) $ map (text . show) (cats cf)) <>
-                    rbrace <> semi
-                  , "use std::str::FromStr;"
-                  ]
-           , "grammar;"
-           , vsep $ map mkOne $ ruleGroups cf
-           , vcat [ "Integer: i32 = {"
-                  , "    r\"[0-9]+\" => i32::from_str(<>).unwrap()"
-                  , "}"
-             ]
-           ]
+parser name cf =
+    vsep [ vcat [ "use crate::" <> "abs_" <> text name <> "::" <> lbrace <>
+                  sep (punctuate (comma <> space) $ map (text . show) (cats cf)) <>
+                  rbrace <> semi
+                , "use std::str::FromStr;"
+                ]
+         , "grammar;"
+         , vsep $ map mkOne $ ruleGroups cf
+         , vcat [ "Integer: i32 = {"
+                , "    r\"[0-9]+\" => i32::from_str(<>).unwrap()"
+                , "}"
+                ]
+         ]
     where
       cats cf = [ fst c | c <- getAbstractSyntax cf ]
       mkOne (cat, rules) = hang (text "pub" <+> text (show cat) <> colon <+> showCat cat <+> equals <+>
                            lbrace) 4 (vcat $ map mkRule rules) $$ rbrace
       showCat cat = case allocStrat cat of
-                      (s, Box)   -> (text "Box<") <> (text s) <> (text ">")
+                      (s, Box)   -> text "Box<" <> text s <> text ">"
                       (s, Stack) -> text s
 
+
+-- | Generate a rule, taking allocation strategy (heap/stack) into account.
 mkRule :: Rul Fun -> Doc
-mkRule r@(Rule fun cat _ _ ) = trace (show cat ++ "  " ++ (show $ allocStrat cat)) $ (rhs r) <+> "=>" <+> (text $ show cat) <> "::" <> (text fun) <> comma
+mkRule r@(Rule fun cat _ _ ) =
+    rhs r <+> if isCoercion fun then empty else
+                  "=>" <+> wrap (text (show $ normCat cat) <> "::" <> text fun)
+                           (case allocStrat cat of
+                              (_, Stack) -> (empty, empty)
+                              (_, Box)   -> (text "Box::new(", text "(<>))")
+                           ) <> comma
     where
       rhs r = case rhsRule r of
                 []  -> text "empty"
                 its -> hsep $ map mkIt its
       mkIt i = case i of
-                 Left c  -> text $ identCat c
-                 Right s -> (text "\"") <> text s <> (text "\"")
+                 Left c  -> text "<" <> text (identCat c) <> text ">"
+                 Right s -> text "\"" <> text s <> text "\""
+
+
+-- | Helper to wrap a document.
+wrap :: Doc -> (Doc, Doc) -> Doc
+wrap body (pre, post) = pre <> body <> post
